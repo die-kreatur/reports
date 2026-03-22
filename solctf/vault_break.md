@@ -2,7 +2,7 @@
 
 This is a writeup for the Vault Break challenge from [solctf.com](https://solctf.com). The challenge is a Solana program binary and an `idl.json` file. The goal is to break the vault with two transactions.
 
-Full description is available on [GitHub](https://github.com/sol-ctf/public-bank/tree/main).
+Full description is available on [GitHub](https://github.com/sol-ctf/public-bank/tree/main/vault-break).
 
 ## IDL analysis
 

@@ -1,6 +1,10 @@
 # sol-ctf: Solshark
 
-This challenge is a network dump with Solana transaction data, with a flag buried in the noise. The file is a transactions log with many very similar requests to the local RPC node and responses from it. The description says there's a transaction storing a treasure. The challenge was tagged as "network," but I didn't bother with Wireshark. It might be more convenient for sorting packets by length and seeking patterns, but `strings` and `grep` were enough. I stuck to command-line tools throughout.
+This is a writeup for the Solshark challenge from [solctf.com](https://solctf.com). The challenge is a network dump with Solana transaction data, with a flag buried in the noise. The file is a transactions log with many very similar requests to the local RPC node and responses from it. The description says there's a transaction storing a treasure. The challenge was tagged as "network," but I didn't bother with Wireshark. It might be more convenient for sorting packets by length and seeking patterns, but `strings` and `grep` were enough. I stuck to command-line tools throughout.
+
+Full description is available on [GitHub](https://github.com/sol-ctf/public-bank/tree/main/sol-shark).
+
+## Decoys
 
 My first instinct was to search for "Flag" directly in the file. The challenge authors anticipated that:
 
@@ -9,6 +13,8 @@ My first instinct was to search for "Flag" directly in the file. The challenge a
 ```
 
 This pattern repeats across many logs, all fake flags from the Memo program designed to throw you off.
+
+## Finding the real flag
 
 The real lead came from searching for `transaction` in the file. This turned up 14 RPC calls of "sendTransaction" method, each carrying a base64-encoded transaction payload. Here's an example:
 
