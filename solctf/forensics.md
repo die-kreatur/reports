@@ -2,7 +2,7 @@
 
 Writeups for all forensics challenges from [solctf.com](https://solctf.com). The platform is down, but challenge descriptions are available on [GitHub](https://github.com/sol-ctf/public-bank/tree/main). No flags are shared.
 
-### Heirloom Archive
+## Heirloom Archive
 
 The challenge gives you a single text file with a hidden flag. The file turned out to not be a text file at all, but an archive. No flag on the surface, so I unpacked it. Inside was another text file, seemingly full of invalid Unicode characters.
 
@@ -14,7 +14,7 @@ Looking closer, I found readable text among the garbage. It resembled stderr out
 
 The `0x` prefix gave it away as hex-encoded data. Decoded the bytes and got the flag.
 
-### Toly Praises ETH
+## Toly Praises ETH
 
 The challenge gives you an audio recording of Anatoly Yakovenko apparently praising Ethereum, with a flag hidden inside. Everything you need is already in the challenge description, and it can be solved in just a few minutes.
 
@@ -30,15 +30,13 @@ In the resulting image I noticed a base58-encoded string embedded in the frequen
 
 I won't spoil it, but the flag is a punchline, something along the lines of "I lied, ETH sucks."
 
-### Shadow SBPF
+## Shadow SBPF
 
 You're given a Solana binary file and asked to find a flag inside. The challenge description sounds intimidating:
 
-```
-The program won't run for you on-chain. It will, however, reveal hints to anyone
-who examines it closely: disassemble the code, inspect the data sections, and decode
-the scrambled fragments. The secret is there, patiently waiting for the right approach.
-```
+> The program won't run for you on-chain. It will, however, reveal hints to anyone
+> who examines it closely: disassemble the code, inspect the data sections, and decode
+> the scrambled fragments. The secret is there, patiently waiting for the right approach.
 
 Despite the hints about disassembly, I prefer to try the simplest approach first. The `strings` command-line tool turned out to be enough to find the flag pieces right away. The challenge also drops this hint in the description:
 
