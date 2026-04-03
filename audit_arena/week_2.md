@@ -2,8 +2,8 @@
 24.03.26 - 29.03.26
 
 ## Acknowledgements
-The report is written by @die-kreatur. It was published before Frank Castle's official judging and represents an independent analysis.
-Since all findings were public, the author reviewed submissions from other participants and included the most interesting ones from @novoyd.
+The report is written by [die-kreatur](https://github.com/die-kreatur). It was published before Frank Castle's official judging and represents an independent analysis.
+Since all findings were public, the author reviewed submissions from other participants and included the most interesting ones from [novoyd](https://github.com/novoyd).
 
 This report may be reproduced or referenced with attribution to the original author.
 
@@ -73,7 +73,7 @@ When `reserve0` reaches `migration_threshold`, `trade_status` transitions to `Mi
 | F-07 | Medium | Slippage protection is checked against gross amount in both `buy` and `sell` |
 | F-08 | Medium | Setting `metadata_authority` causes a protocol-wide DoS on mission creation |
 | F-09 | Low | A single player can occupy all three submitter slots |
-| F-10 | Low | Unbounded `v0`/`v1` parameters may cause silent AMM reserve overflow |
+| F-10 | Low | Unbounded `v0`/`v1` parameters may corrupt AMM pricing |
 | F-11 | Low | Fee parameters are unbounded in `init` and `set_global_config` |
 
 ## Detailed Findings
@@ -131,7 +131,7 @@ This finding combines two independent oversights that together enable draining t
 
 **Stale reserves after migration.** The `migrate` instruction transfers `reserve1` tokens to the executor and `reserve0` SOL minus the migration fee, but never zeroes these fields in state. After migration, `reserve0` and `reserve1` still reflect the pre-migration AMM balances even though the actual funds are gone.
 
-**`Missionx` PDA still holds creator SOL.** The `Missionx` PDA acts as a treasury: it holds both `reserve0` (trading SOL) and `payout_amount` (the creator's deposit). Migration only removes `reserve0`; the creator's deposit remains on the PDA balance.
+**`Missionx` PDA still holds creator SOL.** The `Missionx` PDA acts as a treasury: it holds both `reserve0` (trading SOL) and `payout_amount` (the creator's deposit). Migration only removes `reserve0`. The creator's deposit remains on the PDA balance.
 
 **Trading can be reopened.** As described in F-03, `ban_active` does not exclude `Migrated` trade status. A moderator can call `ban_active(ban_sell=false)` on a migrated mission, leaving `old_trade_status = None`. `switch_ban_to_failed` then passes its `old_trade_status` check and sets `trade_status = Open`, reopening trading on a mission that should be permanently closed.
 
@@ -218,17 +218,24 @@ require!(
 );
 ```
 
-### [F-10] Unbounded `v0`/`v1` parameters may cause silent AMM reserve overflow
+### [F-10] Unbounded `v0`/`v1` parameters may corrupt AMM pricing
 
-`v0` and `v1` (virtual SOL and token reserves) are set by the owner via `init` and `set_global_config` without upper-bound validation. `get_full_sol_reserve` and `get_full_token_reserve` compute `v0 + reserve0` and `v1 + reserve1` using unchecked addition — both functions note this in comments as potential overflow.
+`v0` and `v1` (virtual SOL and token reserves) are set by the owner via `init` and `set_global_config` without any bounds validation. This creates two potential misconfiguration scenarios.
 
-If the owner sets an excessively large value (e.g. a typo adding an extra digit), the addition silently overflows and corrupts AMM pricing for all missions created after the change. This affects every subsequent `buy` and `sell` call.
+**Excessively large values.** `get_full_sol_reserve` and `get_full_token_reserve` compute `v0 + reserve0` and `v1 + reserve1` using unchecked addition. If the owner sets an excessively large value (e.g. a typo adding an extra digit), the addition silently overflows and corrupts AMM pricing for all missions created after the change. For instance, if admin accidentally sets `v1 = 18_000_000_000_000_000_000` instead of `1_800_000_000_000_000_000`, the overflow occurs on the very first `buy`, because `reserve1` is initialized to `985_000_000_000_000_000` (`MINT_AMOUNT` minus reserved payouts) and `get_full_token_reserve()` is `18_000_000_000_000_000_000 + 985_000_000_000_000_000 = 18_985_000_000_000_000_000`, while `u64::MAX` is only `18_446_744_073_709_551_615`.
 
-Severity is Low because only the trusted owner role can trigger this, but the impact is protocol-wide and not recoverable without a config update.
+**Zero or near-zero values.** If `v0` is set to zero, `full_sol_reserve = reserve0` with no virtual liquidity depth, causing the bonding curve to price tokens at near-zero cost from the first purchase. If `v1` is set to zero, the token reserve appears depleted before any trading occurs.
+
+Both scenarios affect every subsequent `buy` and `sell` call on missions created after the misconfiguration, and are not recoverable without a config update. Severity is Low because only the trusted owner role can trigger this, but the impact is protocol-wide.
 
 #### Recommended Fix
 
-Add upper-bound validation on `v0` and `v1` in both `init` and `set_global_config`. Replace unchecked addition in `get_full_sol_reserve` and `get_full_token_reserve` with `checked_add`.
+Add both lower- and upper-bound validation on `v0` and `v1` in both `init` and `set_global_config`. Replace unchecked addition in `get_full_sol_reserve` and `get_full_token_reserve` with `checked_add`.
+
+```rust
+require!(v0 >= MIN_VIRTUAL_RESERVE && v0 <= MAX_VIRTUAL_RESERVE, MissionxErrors::InvalidVirtualReserve);
+require!(v1 >= MIN_VIRTUAL_RESERVE && v1 <= MAX_VIRTUAL_RESERVE, MissionxErrors::InvalidVirtualReserve);
+```
 
 ### [F-11] Fee parameters are unbounded in `init` and `set_global_config`
 
