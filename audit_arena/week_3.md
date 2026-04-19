@@ -2,7 +2,7 @@
 07.04.26 - 12.04.26
 
 ## Acknowledgements
-This report was written by [die-kreatur](https://github.com/die-kreatur). It was published before Frank Castle's official judging and represents an independent analysis.
+This report was written by [die-kreatur](https://github.com/die-kreatur). It was published before Frank Castle's official judging and represents an independent analysis. The report has since been revised in light of Frank Castle's official verdicts to correct missed findings and errors in the original analysis.
 
 This report may be reproduced or referenced with attribution to the original author.
 
@@ -22,44 +22,20 @@ Zenon is a pump.fun-style token launchpad. Anyone can create a token, which is i
 
 Global parameters (fee rates, graduation threshold, treasury addresses) are stored in a versioned `Market` PDA. Each token has its own `BondingCurve` PDA that tracks virtual and real reserves and holds SOL directly as lamports. Tokens are held in an ATA owned by the `BondingCurve` PDA. The protocol collects a SOL trading fee on every swap and an escape fee on graduation; a flat token amount (`tokens_fee_amount`) is also reserved at graduation for the protocol.
 
-## Design concerns
-
-`Market` is passed as an account into every instruction and read at execution time, meaning any change via `update_market` takes effect immediately across all existing bonding curves. Parameters like `trading_fee_bps` and `escape_amount` are global. A single update affects every token ever launched against that market, regardless of when it was created or what its current state is.
-
-This creates two problems. First, it is a centralisation risk: a single admin action can silently alter the economics of an unbounded number of active curves. Second, it is operationally unsound: since `init_token` can be called for any number of mints, the admin cannot reasonably predict how a parameter change will interact with each individual curve at the time the change is made.
-
-A better design would be to snapshot the relevant market parameters into the `BondingCurve` account at `init_token` time, at minimum `trading_fee_bps` and `escape_amount`. Changes to `Market` would then only affect curves created after the update, leaving existing curves with the parameters they were launched under. This significantly reduces both centralisation risk and the blast radius of a misconfiguration.
-
 ## Findings Summary
 | ID | Severity | Title |
 |----|---------|-------|
-| F-01 | High | `initialize_market` has no access control |
-| F-02 | Medium | `escape_amount` validation in `save_market` always passes |
-| F-03 | Medium | Stack overflow in `InitializeAndMint` prevents all token creation |
-| F-04 | Medium | Slippage check in `sell_tokens` is applied to gross SOL amount before fee deduction |
+| F-01 | Medium | `escape_amount` validation in `save_market` always passes |
+| F-02 | Medium | Stack overflow in `InitializeAndMint` prevents all token creation |
+| F-03 | Medium | Slippage check in `sell_tokens` is applied to gross SOL amount before fee deduction |
+| F-04 | Medium | Uncapped buy past escape amount causes underflow in `process_completed_curve`, freezing all curve SOL |
 | F-05 | Low | Unvalidated `sol_offset` in `init_token` permanently breaks the bonding curve |
 | F-06 | Low | `tokens_fee_cooldown_timestamp` set by token creator can permanently freeze fee withdrawal |
+| F-07 | Low | Mutable shared `Market` lets authority retroactively rewrite live bonding curve economics |
 
 ## Detailed Findings
 
-### [F-01] `initialize_market` has no access control
-
-A `Market` is the global configuration account that controls fee rates, treasury destinations, and the graduation threshold for all bonding curves launched against it. Whoever holds `market.authority` can update all of these parameters at any time via `update_market`.
-
-`initialize_market` requires only a `payer` signer with no restriction on who can call it. Any account can create a `Market` PDA for any unused `version`, set themselves as `authority`, and point all treasury fields to addresses they control.
-
-This make possible different malicious actions. For instance, an attacker creates a market with their own authority, waits for users to launch tokens against it, then calls `update_market` to set `trading_fee_bps = 10000`. Every subsequent buy and sell on those tokens transfers 100% of the SOL input as a trading fee to the attacker's treasury. Users receive tokens but lose all the SOL they spent. There is no on-chain signal distinguishing a legitimate market from a malicious one.
-
-#### Recommended Fix
-
-Restrict `initialize_market` to a known protocol admin, either via a hardcoded key or a separate admin PDA:
-
-```rust
-#[account(mut, constraint = payer.key() == PROTOCOL_ADMIN)]
-pub payer: Signer<'info>,
-```
-
-### [F-02] `escape_amount` validation in `save_market` always passes on `initialize_market`
+### [F-01] `escape_amount` validation in `save_market` always passes on `initialize_market`
 
 `escape_amount` is the number of tokens that must be sold before a bonding curve completes. It must not exceed `initial_mint` (the total token supply) otherwise the graduation threshold can never be reached.
 
@@ -80,7 +56,7 @@ market.initial_mint = market_data.initial_mint;
 market.escape_amount = market_data.escape_amount;
 ```
 
-### [F-03] Stack overflow in `InitializeAndMint` prevents all token creation
+### [F-02] Stack overflow in `InitializeAndMint` prevents all token creation
 
 Solana's BPF VM enforces a hard 4096-byte limit per stack frame. When an Anchor accounts struct is too large, the generated `try_accounts` deserialisation exceeds this limit and the transaction fails at runtime.
 
@@ -96,7 +72,7 @@ pub market: Box<Account<'info, Market>>,
 pub bonding_curve_ata: Box<Account<'info, TokenAccount>>,
 ```
 
-### [F-04] Slippage check in `sell_tokens` is applied to gross SOL amount before fee deduction
+### [F-03] Slippage check in `sell_tokens` is applied to gross SOL amount before fee deduction
 
 Slippage protection lets a seller specify a minimum acceptable SOL output (`min_sol_amount`) to guard against unfavourable price movement between transaction submission and execution. For this guarantee to hold, the check must be applied to what the seller actually receives.
 
@@ -111,6 +87,34 @@ let trading_fee = calculate_fee(sol_amount.into(), trading_fee_bps.into(), 10000
 let net_sol_amount = sol_amount.checked_sub(trading_fee).unwrap();
 if net_sol_amount < min_sol_amount {
     return Err(TokenError::MinSolAmountNotMet.into());
+}
+```
+
+### [F-04] Uncapped buy past escape amount causes underflow in `process_completed_curve`, freezing all curve SOL
+
+`process_completed_curve` assumes that when a bonding curve completes, `real_token_reserves >= tokens_fee_amount`. This invariant is never enforced.
+
+In `buy_tokens`, when a purchase crosses the escape threshold, the code subtracts the full swap output from `real_token_reserves` without capping it. If the resulting value falls below `tokens_fee_amount`, the curve is marked `completed = true` with reserves in an inconsistent state.
+
+Once `completed = true`, `buy_tokens` and `sell_tokens` both reject with `BondingCurveCompleted`. `process_completed_curve` then attempts:
+
+```rust
+let token_amount = bonding_curve
+    .real_token_reserves
+    .checked_sub(market.tokens_fee_amount)
+    .unwrap();
+```
+
+`checked_sub` returns `None` and `.unwrap()` panics. The transaction reverts and `process_completed_curve` can never succeed. All SOL accumulated in the `BondingCurve` PDA is permanently frozen with no extraction path. The trigger is permissionless, so any buyer can cause this intentionally or accidentally.
+
+#### Recommended Fix
+
+In `buy_tokens`, before updating reserves, check that the remaining token reserves after the purchase are sufficient to cover `tokens_fee_amount`:
+
+```rust
+let remaining = bonding_curve.real_token_reserves.checked_sub(token_amount).unwrap();
+if remaining < market.tokens_fee_amount {
+    return Err(TokenError::InsufficientTokensForFee.into());
 }
 ```
 
@@ -144,3 +148,13 @@ ctx.accounts.bonding_curve.tokens_fee_cooldown_timestamp = Clock::get()?.unix_ti
 ```
 
 Additionally, `cooldown_period` itself should be bounded by a protocol-defined maximum to prevent unreasonably long cooldowns.
+
+### [F-07] Mutable shared `Market` lets authority retroactively rewrite live bonding curve economics
+
+`Market` is passed as an account into every instruction and read at execution time. Any change via `update_market` takes effect immediately across all existing bonding curves. Parameters like `trading_fee_bps` and `escape_amount` are global — a single admin call silently alters the economics of every token ever launched against that market, regardless of when it was created or what its current state is.
+
+This has two consequences. First, it is a centralisation risk: the market authority can retroactively change fee rates or graduation thresholds on live curves that users joined under different terms. Second, it is operationally unsound: because `init_token` can be called for any number of mints, the admin cannot predict how a parameter change interacts with each individual curve at execution time.
+
+#### Recommended Fix
+
+Snapshot the relevant market parameters into `BondingCurve` at `init_token` time — at minimum `trading_fee_bps` and `escape_amount`. `update_market` would then only affect curves created after the update, leaving existing curves with the parameters they were launched under.
